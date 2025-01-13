@@ -1,0 +1,40 @@
+# Ignore Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Ignore virtual environments
+venv/
+.venv/
+
+buid.sh
+run.sh
+deploy.sh
+
+# Ignore environment files (never include secrets in your image!)
+.env
+.env.*
+
+# Ignore logs and database files
+*.log
+*.sqlite3
+
+# Ignore version control system files
+.git
+.gitignore
+
+# Ignore Docker-related files
+Dockerfile
+docker-compose.yml
+
+# Ignore IDE/editor settings
+*.swp
+.idea/
+.vscode/
+
+# Ignore build artifacts
+build/
+dist/
+*.egg-info/
+

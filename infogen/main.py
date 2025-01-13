@@ -1,10 +1,10 @@
 from fastapi import FastAPI
 
 # Create the FastAPI app instance
-app = FastAPI()
+infogen = FastAPI()
 
 # Define a simple route
-@app.get("/")
+@infogen.get("/")
 def read_root():
-    return {"message": "Hello, World!"}
+    return {"message": "Hello, World reloaded!"}
 

@@ -6,4 +6,8 @@ sqlite-utils==3.38
 python-dotenv==1.0.1
 pytest==8.3.4
 httpx==0.28.1
+langgraph>=0.0.15
+openai>=1.12.0
+tavily-python>=0.1.9
+tiktoken>=0.5.2
 

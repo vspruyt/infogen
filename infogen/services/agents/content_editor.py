@@ -2,6 +2,7 @@ from openai import AsyncOpenAI
 import os
 from ..state import WorkflowState
 from typing import List
+import asyncio
 
 def format_research_report(search_results: List[dict]) -> str:
     """Format search results into a research report."""
@@ -26,25 +27,37 @@ def format_research_report(search_results: List[dict]) -> str:
     return "\n".join(report)
 
 async def edit_content(state: WorkflowState) -> WorkflowState:
-    """Process the research report and create infographic content."""
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise ValueError("OPENAI_API_KEY not found in environment variables")
+    """Process search results into infographic content."""
+    try:
+        # Get unique search results by URL to avoid duplicates
+        unique_results = {}
+        for result in state.get('search_results', []):
+            if isinstance(result, dict):
+                url = result.get('url')
+                if url and url not in unique_results:
+                    unique_results[url] = result
+
+        search_results = list(unique_results.values())
+        print(f"\nSearch results in content editor: {len(search_results)}")
         
-    client = AsyncOpenAI(api_key=api_key)
-    
-    # Print debug info
-    print(f"\nSearch results in content editor: {len(state['search_results'])}")
-    
-    # Format the research report - use dictionary access
-    research_report = format_research_report(state["search_results"])
-    
-    # Print debug info
-    print(f"\nFormatted research report length: {len(research_report)}")
-    if len(research_report) < 100:  # If report is suspiciously short
-        print(f"Research report content: {research_report}")
-    
-    prompt = f"""#### Instructions ####
+        if not search_results:
+            state["error"] = "No valid search results to process"
+            state["status"] = "error"
+            return state
+            
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise ValueError("OPENAI_API_KEY not found in environment variables")
+        
+        # Format the research report
+        research_report = format_research_report(search_results)
+        
+        # Print debug info
+        print(f"\nFormatted research report length: {len(research_report)}")
+        if len(research_report) < 100:  # If report is suspiciously short
+            print(f"Research report content: {research_report}")
+        
+        prompt = f"""#### Instructions ####
 You are an experienced desk researcher tasked with preparing content for a visually stunning infographic. The infographic will be created by designers based on your output and the research report below. 
 
 *Your output must be in Markdown format and adhere to the detailed specifications provided.*
@@ -93,14 +106,23 @@ The infographic will include:
 
 {research_report}"""
 
-    print("\n📝 Editing content for infographic...")
-    
-    response = await client.chat.completions.create(
-        model="gpt-4",
-        messages=[{"role": "user", "content": prompt}]
-    )
-    
-    state['infographic_content'] = response.choices[0].message.content
-    print("\n✨ Content editing complete")
-    
-    return state 
+        print("\n📝 Editing content for infographic...")
+        
+        client = AsyncOpenAI(api_key=api_key)
+        response = await client.chat.completions.create(
+            model="gpt-4",
+            messages=[{
+                "role": "user", 
+                "content": prompt  # prompt remains the same
+            }]
+        )
+        
+        content = response.choices[0].message.content
+        state['infographic_content'] = content
+        state['status'] = 'continue'
+        return state
+        
+    except Exception as e:
+        state["error"] = f"Error editing content: {str(e)}"
+        state["status"] = "error"
+        return state 

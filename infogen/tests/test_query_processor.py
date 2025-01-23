@@ -38,14 +38,14 @@ def print_infographic_content(content: str):
     print(content)
     print("\n=========================\n")
 
-def test_workflow():
+async def test_workflow():
     print("\n🔍 Testing Research Workflow\n")
     
     # Test query
     query = "dogs"
     
     # Process the query
-    result = process_query(query)
+    result = await process_query(query)
     
     # Print results
     print(f"Original Query: {result['original_query']}")
@@ -71,4 +71,4 @@ def test_workflow():
     print(result['infographic_content'])
 
 if __name__ == "__main__":
-    test_workflow() 
+    asyncio.run(test_workflow()) 

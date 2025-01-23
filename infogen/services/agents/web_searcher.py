@@ -10,6 +10,9 @@ from langgraph.graph.message import add_messages
 import json
 from datetime import datetime, timezone
 from ..clients.cached_tavily_client import CachedTavilyClient
+from langchain_core.callbacks import Callbacks
+from langchain_core.messages import BaseMessage
+from langchain_core.callbacks.manager import adispatch_custom_event
 
 # Constants
 MIN_REQUIRED_RESULTS = 1  # Minimum number of search results required
@@ -493,14 +496,19 @@ async def process_search_results_async(state: WorkflowState) -> WorkflowState:
         state["status"] = "error"
         return state
 
-def process_search_results(state: WorkflowState) -> WorkflowState:
+async def process_search_results(state: WorkflowState) -> WorkflowState:
     """Process search results and update state."""
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_closed():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        return loop.run_until_complete(process_search_results_async(state))
+        result = await process_search_results_async(state)
+        
+        # Emit custom event showing number of URLs processed
+        num_urls = len(result.get("search_results", []))
+        await adispatch_custom_event(
+            "url_count",
+            {"message": f"--->> Processed {num_urls} URLs"}
+        )
+            
+        return result
     except Exception as e:
         state["error"] = f"Error processing search results: {str(e)}"
         state["status"] = "error"

@@ -1,16 +1,33 @@
-from openai import OpenAI
+from openai import AsyncOpenAI
 import os
 from ..state import WorkflowState
 from datetime import datetime, timezone
+from langchain_core.callbacks import Callbacks
+from langchain_core.messages import BaseMessage
+from langchain_core.callbacks.manager import adispatch_custom_event
 
-def enhance_initial_query(state: WorkflowState) -> WorkflowState:
+async def enhance_initial_query(state: WorkflowState) -> WorkflowState:
     """Enhance the initial query to be more specific and searchable."""
     try:
+        # Initialize state if needed
+        if "bad_domains" not in state:
+            state["bad_domains"] = []
+            
+        # Handle retry logic
+        if state.get("status") == "insufficient_results":
+            retry_count = state.get("retry_count", 0) + 1
+            print(f"\n🔄 Retrying with enhanced query (attempt {retry_count + 1}/3)")
+            state["retry_count"] = retry_count
+            
+            # Clear enhanced query if retrying to force a new one
+            state["previous_enhanced_query"] = state.get("enhanced_query")
+            state["enhanced_query"] = None
+            
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise ValueError("OPENAI_API_KEY not found in environment variables")
         
-        client = OpenAI(api_key=api_key)
+        client = AsyncOpenAI(api_key=api_key)
         
         prompt = f"""I built a product that takes in a user query, and generates an infographic on that topic. The user input sometimes is very short, but under the hood I'm using an AI agent based framework that requires a clear topic or question to be researched through web search queries.
 
@@ -22,7 +39,7 @@ In case you need it: The current date is {datetime.now(timezone.utc).strftime('%
 
 Here is the user query: "{state['original_query']}"."""            
 
-        response = client.chat.completions.create(
+        response = await client.chat.completions.create(
             model="gpt-4o",
             messages=[{"role": "user", "content": prompt}]
         )
@@ -31,7 +48,7 @@ Here is the user query: "{state['original_query']}"."""
         enhanced_query = result    
         
         # Calculate embedding for the enhanced query
-        embedding_response = client.embeddings.create(
+        embedding_response = await client.embeddings.create(
             model="text-embedding-3-small",
             input=enhanced_query
         )
@@ -40,6 +57,13 @@ Here is the user query: "{state['original_query']}"."""
         state["enhanced_query"] = enhanced_query
         state["enhanced_query_embedding"] = embedding
         state["status"] = "continue"
+
+        # Emit custom event showing query mapping
+        await adispatch_custom_event(
+            "query_mapping",
+            {"message": f"--->> Query mapping: '{state['original_query']}' -> '{enhanced_query}'"}
+        )
+        
         return state
         
     except Exception as e:

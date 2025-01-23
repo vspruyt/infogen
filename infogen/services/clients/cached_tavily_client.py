@@ -140,7 +140,7 @@ class CachedTavilyClient:
                 ]
             
             if len(cached_results) >= min_required_results:
-                print(f"\n📂 Using {len(cached_results)} cached results for query: {query}")
+                print(f"\n📂 Using {len(cached_results)} cached results for query: {enhanced_query}")
                 return {
                     'results': [
                         {

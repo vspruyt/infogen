@@ -4,6 +4,9 @@ from ..state import WorkflowState
 from typing import List
 import asyncio
 from datetime import datetime, timezone
+from langchain_core.callbacks import Callbacks
+from langchain_core.messages import BaseMessage
+from langchain_core.callbacks.manager import adispatch_custom_event
 
 def format_research_report(search_results: List[dict]) -> str:
     """Format search results into a research report."""
@@ -30,6 +33,12 @@ def format_research_report(search_results: List[dict]) -> str:
 async def edit_content(state: WorkflowState) -> WorkflowState:
     """Process search results into infographic content."""
     try:
+        # Emit custom event showing we're starting content generation
+        await adispatch_custom_event(
+            "content_start",
+            {"message": "--->> Starting infographic content generation"}
+        )
+            
         # Get unique search results by URL to avoid duplicates
         unique_results = {}
         for result in state.get('search_results', []):

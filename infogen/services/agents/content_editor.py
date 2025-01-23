@@ -3,6 +3,7 @@ import os
 from ..state import WorkflowState
 from typing import List
 import asyncio
+from datetime import datetime, timezone
 
 def format_research_report(search_results: List[dict]) -> str:
     """Format search results into a research report."""
@@ -62,6 +63,8 @@ You are an experienced desk researcher tasked with preparing content for a visua
 
 *Your output must be in Markdown format and adhere to the detailed specifications provided.*
 
+In case you need it: The current date is {datetime.now(timezone.utc).strftime('%B %d, %Y')}.
+
 ---
 
 ### Infographic Content Specification
@@ -72,6 +75,7 @@ Prepare engaging, thought-provoking, and accurate content for a 1-4 page infogra
 - Contain real, sourced data for all statistics and information.
 - Include references for every data point and section.
 - Don't specify which visual elements (e.g. charts, maps, etc.) to be used. That will be decided later by the designer.
+- Be concise and don't use too much text. Prefer numbers, tables, facts that can be visualized in charts over continuous text.
 
 #### Structure
 The infographic will include:
@@ -83,11 +87,13 @@ The infographic will include:
 
 1. **Content Requirements**
    - Provide complete, accurate text and data, ready for direct use in the infographic.
+   - Prioritize including relevant and high-quality information, especially when containing statistics, numbers, verifiable facts, or concrete data.
    - Do not use placeholders or fake data. If data is unavailable, omit the section.
    - Use Markdown tables where appropriate for listing data.
    - Summarize or combine relevant information from the research report; include only what is necessary for clarity and impact.
    - Focus on the content, not on the visuals or design. Don't include Visual Instruction or guidelines, that will be done later by the designer.
    - You can include a small paragraph of continuous text in the sections if that helps (e.g. a small intro paragraph in the first section). 
+   - Prefer lists, tables, numbers, statistics, categories, etc. over continuous text.
 
 2. **Format**
    - Use valid Markdown.
@@ -110,7 +116,7 @@ The infographic will include:
         
         client = AsyncOpenAI(api_key=api_key)
         response = await client.chat.completions.create(
-            model="gpt-4",
+            model="gpt-4o",
             messages=[{
                 "role": "user", 
                 "content": prompt  # prompt remains the same

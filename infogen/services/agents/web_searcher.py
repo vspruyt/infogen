@@ -1,4 +1,3 @@
-from tavily import TavilyClient
 from openai import AsyncOpenAI
 import os
 import asyncio
@@ -9,6 +8,8 @@ from functools import partial
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 import json
+from datetime import datetime, timezone
+from ..clients.cached_tavily_client import CachedTavilyClient
 
 # Constants
 MIN_REQUIRED_RESULTS = 1  # Minimum number of search results required
@@ -18,7 +19,7 @@ MAX_CONCURRENT_REQUESTS = 5  # Adjust based on your API limits
 def truncate_text(text: str, max_tokens: int = 100000) -> str:
     """Truncate text to fit within token limit, trying to keep complete sentences."""
     # Initialize tokenizer
-    encoding = tiktoken.encoding_for_model("gpt-4")
+    encoding = tiktoken.encoding_for_model("gpt-4o")
     
     # Get tokens for the text
     tokens = encoding.encode(text)
@@ -51,7 +52,12 @@ Content: {truncated_content}
 
 First, determine if this content is relevant and contains useful information for our research topic.
 If it does NOT contain relevant information, respond with exactly "INVALID_CONTENT" and nothing else.
-If the content IS relevant, create a structured markdown summary that includes:
+If the content IS relevant, create a structured markdown summary.
+
+Prioritize including relevant and high-quality information, especially when containing statistics, numbers, verifiable facts, or concrete data.
+In case you need it: The current date is {datetime.now(timezone.utc).strftime('%B %d, %Y')}.
+
+The summary should be in the following Markdown format:
 
 # Short Summary
 [Brief summary of what the document is about]
@@ -73,7 +79,7 @@ Please be concise but specific, focusing on elements that would be valuable for 
 
     try:
         response = await client.chat.completions.create(
-            model="gpt-4",  # Fixed typo in model name
+            model="gpt-4o",
             messages=[
                 {"role": "system", "content": "You are a helpful research assistant that summarizes content for infographics."},
                 {"role": "user", "content": prompt}
@@ -99,17 +105,21 @@ Please be concise but specific, focusing on elements that would be valuable for 
         return None
 
 class SearchState(TypedDict):
-    query: str
+    query: str  # original query
+    enhanced_query: str  # enhanced version of the query
+    enhanced_query_embedding: Union[List[float], None]  # embedding of enhanced query
     results: Annotated[list, add_messages]
     status: str
     error: str | None
+    bad_domains: List[str]  # List of domains to exclude
 
-def handle_error(error: str) -> Dict:
+def handle_error(error: str, state: SearchState = None) -> Dict:
     """Handle errors in the workflow"""
     return {
         "results": [],
         "error": error,
-        "status": "error"
+        "status": "error",
+        "bad_domains": state.get("bad_domains", []) if state else []  # Preserve bad_domains if state is available
     }
 
 async def search_node(state: SearchState):
@@ -118,103 +128,199 @@ async def search_node(state: SearchState):
         if not tavily_key:
             return handle_error("Missing TAVILY_API_KEY")
             
-        tavily_client = TavilyClient(api_key=tavily_key)
-        print(f"\n🌐 Searching the web for: {state['query']}")
+        tavily_client = CachedTavilyClient(api_key=tavily_key)
+        print(f"\n🌐 Searching the web for: {state['enhanced_query']}")
         
-        response = tavily_client.search(
-            query=state['query'],
-            search_depth="advanced",
-            max_results=MAX_TAVILY_SEARCH_RESULTS,
-            include_raw_content=True,
-        )
-        
-        results_count = len(response['results'])
-        print(f"\n📊 Found {results_count} search result{'s' if results_count != 1 else ''}")
-        
-        if results_count < MIN_REQUIRED_RESULTS:
-            print("\n⚠️ Insufficient search results, will try to enhance query...")
+        try:
+            # Get bad_domains from state if available
+            bad_domains = state.get('bad_domains', [])
+            if bad_domains:
+                print(f"\n🚫 Excluding previously failed domains: {bad_domains}")
+            
+            # First get the list of URLs without raw content
+            response = await tavily_client.search(
+                query=state['query'],  # original query
+                enhanced_query=state['enhanced_query'],  # enhanced query
+                enhanced_query_embedding=state.get('enhanced_query_embedding'),  # pass the embedding
+                min_required_results=MIN_REQUIRED_RESULTS,
+                search_depth="advanced",
+                max_results=MAX_TAVILY_SEARCH_RESULTS,
+                include_raw_content=False,
+                exclude_domains=bad_domains if bad_domains else None,
+            )
+            
+            # Close the client connection
+            await tavily_client.close()
+            
+            results_count = len(response['results'])
+            print(f"\n📊 Found {results_count} search result{'s' if results_count != 1 else ''}")
+            
+            if results_count < MIN_REQUIRED_RESULTS:
+                print("\n⚠️ Insufficient search results, will try to enhance query...")
+                return {
+                    "results": [],
+                    "status": "insufficient_results",
+                    "bad_domains": bad_domains  # Preserve bad_domains in state
+                }
+            
+            # Only format and return results if we have enough
+            formatted_results = [{
+                'role': 'assistant',
+                'content': json.dumps({
+                    'title': result.get('title', ''),
+                    'url': result.get('url', ''),
+                    'score': result.get('score', 0)
+                })
+            } for result in response['results']]
+            
             return {
-                "results": [],
-                "status": "insufficient_results"
+                "results": formatted_results,
+                "status": "success",
+                "bad_domains": bad_domains  # Preserve bad_domains in state
             }
-        
-        # Only format and return results if we have enough
-        formatted_results = [{
-            'role': 'assistant',
-            'content': json.dumps({
-                'title': result.get('title', ''),
-                'url': result.get('url', ''),
-                'raw_content': result.get('raw_content', ''),
-                'content': result.get('content', '')
-            })
-        } for result in response['results']]
-        
-        return {
-            "results": formatted_results,
-            "status": "success"
-        }
-        
+        finally:
+            await tavily_client.close()
+            
     except Exception as e:
-        return handle_error(str(e))
+        return {
+            "results": [],
+            "error": str(e),
+            "status": "error",
+            "bad_domains": state.get("bad_domains", [])  # Preserve bad_domains even on error
+        }
 
 async def process_node(state: SearchState):
     try:
         openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        tavily_client = CachedTavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
         semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
         
-        async def process_single_result(message):
-            async with semaphore:
-                try:
-                    content = message.content if hasattr(message, 'content') else message.get('content')
-                    if not content:
-                        return None
-                        
-                    result = json.loads(content)
-                    content_text = result.get('raw_content') or result.get('content')
-                    if not content_text or not isinstance(content_text, str):
-                        print(f"\n⚠️ No valid content found for {result.get('url', 'unknown URL')}")
-                        return None
-                    
-                    print(f"\n🔍 Processing data from {result.get('url', 'unknown URL')}")
-                    
-                    processed = await summarize_content(
-                        openai_client, 
-                        state['query'], 
-                        {
-                            'title': result.get('title', ''),
-                            'url': result.get('url', ''),
-                            'content': content_text
-                        }
-                    )
-                    
-                    if processed:  # Only return if we got valid processed content
-                        print(f"\n✅ Finished processing: {result.get('url', 'unknown URL')}")
-                        return {
-                            'role': 'assistant',
-                            'content': json.dumps(processed)
-                        }
-                    return None  # Return None if processing didn't yield valid content
-                        
-                except Exception as e:
-                    print(f"\n⚠️ Error processing result: {str(e)}")
-                    return None
+        async def handle_bad_url(url: str, state: dict, reason: str):
+            """Helper function to handle bad URLs consistently"""
+            try:
+                # Delete from cache
+                await tavily_client.delete_from_cache(url)
+                
+                # Add domain to bad_domains list
+                from urllib.parse import urlparse
+                domain = urlparse(url).netloc
+                if domain and domain not in state.get("bad_domains", []):
+                    if "bad_domains" not in state:
+                        state["bad_domains"] = []
+                    print(f"\n⚠️ Adding {domain} to bad domains list (reason: {reason})")
+                    state["bad_domains"].append(domain)
+            except Exception as e:
+                print(f"\n⚠️ Error handling bad URL {url}: {str(e)}")
+        
+        try:
+            async def process_single_result(message):                
             
-            return None
-        
-        results = await asyncio.gather(
-            *[process_single_result(message) for message in state['results']]
-        )
-        
-        # Filter out None results
-        processed_results = [r for r in results if r is not None]
-        
-        return {
-            "results": processed_results, 
-            "status": "insufficient_results" if len(processed_results) < MIN_REQUIRED_RESULTS else "success"
-        }
+                async with semaphore:
+                    try:
+                        content = message.content if hasattr(message, 'content') else message.get('content')
+                        if not content:
+                            return None
+                            
+                        result = json.loads(content)
+                        url = result.get('url')
+                        if not url:
+                            print(f"\n⚠️ No URL found in result")
+                            return None
+                        
+                        print(f"\n🔍 Extracting content from {url}")
+                        
+                        # Extract raw content using Tavily's extract method
+                        try:
+                            print(f"\n🔍 Requesting content extraction for {url}")
+                            response = await tavily_client.extract(
+                                urls=[url],
+                                query=state['query'],  # original query
+                                enhanced_query=state['enhanced_query'],  # enhanced query
+                            )
+                            
+                            if not isinstance(response, dict) or 'results' not in response:
+                                print(f"\n⚠️ Invalid response format from extract API for {url}. Response: {response}")
+                                await handle_bad_url(url, state, "invalid response format")
+                                return None
+                                
+                            extracted = response['results']
+                            if not extracted or len(extracted) == 0:
+                                print(f"\n⚠️ No results in extract response for {url}")
+                                await handle_bad_url(url, state, "no extract results")
+                                return None
+                                
+                            content_text = extracted[0].get('raw_content')
+                            if not content_text or not isinstance(content_text, str):
+                                print(f"\n⚠️ No valid content in extract response for {url}. Result: {extracted[0]}")
+                                await handle_bad_url(url, state, "invalid content")
+                                return None
+                                
+                            print(f"\n✅ Successfully extracted {len(content_text)} characters from {url}")
+                            
+                        except Exception as e:
+                            print(f"\n⚠️ Failed to extract content from {url}. Error: {str(e)}")
+                            print(f"Error type: {type(e)}")
+                            await handle_bad_url(url, state, f"extraction error: {str(e)}")
+                            return None
+                        
+                        print(f"\n📝 Processing content from {url}")
+                        
+                        processed = await summarize_content(
+                            openai_client, 
+                            state['enhanced_query'],  # Use enhanced query for summarization
+                            {
+                                'title': result.get('title', ''),
+                                'url': url,
+                                'score': result.get('score', 0),
+                                'content': content_text
+                            }
+                        )
+                        
+                        if processed:  # Only return if we got valid processed content
+                            print(f"\n✅ Finished processing: {url}")
+                            return {
+                                'role': 'assistant',
+                                'content': json.dumps(processed)
+                            }
+                        
+                        # Content was not relevant
+                        await handle_bad_url(url, state, "irrelevant content")
+                        return None
+                            
+                    except Exception as e:
+                        print(f"\n⚠️ Error processing result: {str(e)}")
+                        if url:
+                            await handle_bad_url(url, state, f"processing error: {str(e)}")
+                        return None
+                
+                return None
+            
+            results = await asyncio.gather(
+                *[process_single_result(message) for message in state['results']]
+            )
+            
+            # Filter out None results
+            processed_results = [r for r in results if r is not None]
+            
+            # Get the bad_domains list that was potentially modified during processing
+            bad_domains = state.get("bad_domains", [])
+            
+            return {
+                "results": processed_results, 
+                "status": "insufficient_results" if len(processed_results) < MIN_REQUIRED_RESULTS else "success",
+                "bad_domains": bad_domains  # Preserve the bad_domains list
+            }
+        finally:
+            await tavily_client.close()
+            
     except Exception as e:
         print(f"\n❌ Error in process_node: {str(e)}")
-        return handle_error(str(e))
+        return {
+            "results": [],
+            "error": str(e),
+            "status": "error",
+            "bad_domains": state.get("bad_domains", [])  # Preserve bad_domains even on error
+        }
 
 def should_continue(state: SearchState) -> str:
     """Route to next node based on state."""
@@ -251,28 +357,42 @@ app = workflow.compile()
 async def execute_search(state: WorkflowState) -> AsyncGenerator[dict, None]:
     """Execute search and yield results as they become available."""
     
+    # Initialize state with existing bad_domains
+    bad_domains = state.get("bad_domains", [])
+    
     inputs = {
-        "query": state.get('enhanced_query', state.get('original_query', '')),
+        "query": state.get('original_query', ''),  # original query
+        "enhanced_query": state.get('enhanced_query', state.get('original_query', '')),  # enhanced query, fallback to original
+        "enhanced_query_embedding": state.get('enhanced_query_embedding'),  # pass the embedding
         "results": [],
         "status": "start",
-        "error": None
+        "error": None,
+        "bad_domains": bad_domains
     }
     
     try:
-        event = None
+        state['search_results'] = []  # Initialize search results list
         async for event in app.astream(inputs):
             if event.get("error"):
                 print(f"\n❌ Error: {event['error']}")
                 state["error"] = event["error"]
                 state["status"] = "error"
+                if "bad_domains" in event:
+                    state["bad_domains"] = event["bad_domains"]
                 return
             
             # Check for insufficient results status
             if event.get("status") == "insufficient_results":
                 state["status"] = "insufficient_results"
+                # Update bad_domains if event has them
+                if "bad_domains" in event:
+                    state["bad_domains"] = event["bad_domains"]
                 return
                 
             if "results" in event:
+                # Update bad_domains if event has them
+                if "bad_domains" in event:
+                    state["bad_domains"] = event["bad_domains"]
                 for result in event["results"]:
                     try:
                         # Get content from message object
@@ -283,52 +403,18 @@ async def execute_search(state: WorkflowState) -> AsyncGenerator[dict, None]:
                         # Parse JSON string back to dict
                         content_dict = json.loads(content)
                         
-                        if isinstance(content_dict, dict):
-                            if 'markdown_summary' in content_dict:
-                                yield content_dict
-                            else:
-                                # Ensure we have either raw_content or content
-                                content_text = content_dict.get('raw_content') or content_dict.get('content')
-                                if content_text and isinstance(content_text, str):
-                                    try:
-                                        processed = await summarize_content(
-                                            AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY")),
-                                            state.get('enhanced_query', state.get('original_query', '')),
-                                            {
-                                                'title': content_dict.get('title', ''),
-                                                'url': content_dict.get('url', ''),
-                                                'content': content_text
-                                            }
-                                        )
-                                        if processed:
-                                            yield processed
-                                    except Exception as e:
-                                        print(f"\n⚠️ Error processing content: {str(e)}")
-                                        continue
-                                
+                        # Only process results that have already been processed and have a markdown summary
+                        if isinstance(content_dict, dict) and 'markdown_summary' in content_dict:
+                            state['search_results'].append(content_dict)  # Update state
+                            yield content_dict  # Yield the result
+                            
                     except json.JSONDecodeError:
                         print(f"\n⚠️ Failed to parse result content")
                         continue
                     except Exception as e:
                         print(f"\n⚠️ Error processing result: {str(e)}")
                         continue
-        
-        if event and "results" in event:
-            # Store only valid results with markdown summaries
-            state['search_results'] = []
-            for r in event["results"]:
-                try:
-                    content = r.content if hasattr(r, 'content') else r.get('content')
-                    if not content:
-                        continue
                         
-                    content_dict = json.loads(content)
-                    if isinstance(content_dict, dict) and 'markdown_summary' in content_dict:
-                        # Only add results that have a markdown summary (meaning they were successfully processed)
-                        state['search_results'].append(content_dict)
-                except Exception:
-                    continue
-            
     except Exception as e:
         print(f"\n❌ Error in execute_search: {str(e)}")
         state["error"] = str(e)
@@ -342,11 +428,14 @@ async def process_search_results_async(state: WorkflowState) -> WorkflowState:
         
         print("\nSearching and processing sources...")
         inputs = {
-            "query": state.get('enhanced_query', state.get('original_query', '')),
+            "query": state.get('original_query', ''),  # original query
+            "enhanced_query": state.get('enhanced_query', state.get('original_query', '')),  # enhanced query, fallback to original
+            "enhanced_query_embedding": state.get('enhanced_query_embedding'),  # pass the embedding
             "results": [],
             "status": "start",
             "error": None,
-            "retry_count": retry_count
+            "retry_count": retry_count,
+            "bad_domains": state.get("bad_domains", [])  # Pass bad_domains to inner workflow
         }
         
         try:
@@ -355,14 +444,20 @@ async def process_search_results_async(state: WorkflowState) -> WorkflowState:
                 if event.get("error"):
                     state["error"] = event["error"]
                     state["status"] = "error"
+                    state["bad_domains"] = event.get("bad_domains", [])  # Preserve bad_domains
                     return state
                 
                 if event.get("status") == "insufficient_results":
                     state["status"] = "insufficient_results"
                     state["retry_count"] = retry_count
+                    if "bad_domains" in event:  # Only update if event has bad_domains
+                        state["bad_domains"] = event["bad_domains"]
                     return state
                 
                 if "results" in event:
+                    # Update bad_domains from event if it exists
+                    if "bad_domains" in event:
+                        state["bad_domains"] = event["bad_domains"]
                     for result in event["results"]:
                         try:
                             content = result.content if hasattr(result, 'content') else result.get('content')
@@ -400,4 +495,13 @@ async def process_search_results_async(state: WorkflowState) -> WorkflowState:
 
 def process_search_results(state: WorkflowState) -> WorkflowState:
     """Process search results and update state."""
-    return asyncio.run(process_search_results_async(state)) 
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        return loop.run_until_complete(process_search_results_async(state))
+    except Exception as e:
+        state["error"] = f"Error processing search results: {str(e)}"
+        state["status"] = "error"
+        return state 

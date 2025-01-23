@@ -7,7 +7,7 @@ from .agents.web_searcher import process_search_results
 from .state import WorkflowState
 from .agents.content_editor import edit_content
 
-MAX_SEARCH_RETRIES = 0
+MAX_SEARCH_TRIES = 3
 
 # Load environment variables from .env file if it exists
 load_dotenv()
@@ -38,8 +38,7 @@ def check_search_results(state: WorkflowState) -> WorkflowState:
     """Check if we have valid search results to continue."""
     if state.get("status") == "insufficient_results":
         retry_count = state.get("retry_count", 0)
-        if retry_count < MAX_SEARCH_RETRIES:
-            print(f"\n🔄 Not enough results, attempt {retry_count + 1}/3")
+        if retry_count < MAX_SEARCH_TRIES:
             # Keep status as insufficient_results
             return state
         else:
@@ -60,8 +59,74 @@ def create_workflow_graph() -> StateGraph:
     workflow = StateGraph(WorkflowState)
     
     # Add all processing nodes
-    workflow.add_node("query_interpreter", enhance_initial_query)
-    workflow.add_node("web_searcher", process_search_results)
+    # Wrap query interpreter to preserve retry count
+    def wrapped_query_interpreter(state: WorkflowState) -> WorkflowState:        
+        
+        # If we're retrying, increment the retry count
+        if state.get("status") == "insufficient_results":
+            retry_count = state.get("retry_count", 0) + 1
+            print(f"\n🔄 Retrying with enhanced query (attempt {retry_count + 1}/{MAX_SEARCH_TRIES})")
+        else:
+            retry_count = 0
+            
+        # Create a copy of the input state to preserve all fields
+        new_state = dict(state)
+        
+        # Clear enhanced query if retrying to force a new one
+        if retry_count > 0:
+            new_state["previous_enhanced_query"] = new_state.get("enhanced_query")
+            new_state["enhanced_query"] = None
+            
+        # Ensure bad_domains exists in state
+        if "bad_domains" not in new_state:
+            new_state["bad_domains"] = []
+            
+        # Run original function with potentially cleared enhanced_query
+        enhanced_state = enhance_initial_query(new_state)
+        
+        # Update our state copy with the enhanced query results while preserving other fields
+        new_state.update(enhanced_state)
+        
+        # Set the retry count
+        new_state["retry_count"] = retry_count
+                            
+        return new_state
+        
+    # Wrap web searcher to track state
+    def wrapped_web_searcher(state: WorkflowState) -> WorkflowState:        
+        
+        # Ensure bad_domains exists
+        if "bad_domains" not in state:
+            state["bad_domains"] = []
+            
+        # Track the number of URLs before processing
+        urls_before = len(state.get("search_results", []))
+        
+        # Process search results
+        result = process_search_results(state)
+        
+        # Track the number of URLs after processing
+        urls_after = len(result.get("search_results", []))
+        
+        # If we lost any URLs during processing, their domains were bad
+        if urls_after < urls_before:
+            # Get the URLs that were removed
+            before_urls = {url["url"] for url in state.get("search_results", [])}
+            after_urls = {url["url"] for url in result.get("search_results", [])}
+            removed_urls = before_urls - after_urls
+            
+            # Extract and add their domains to bad_domains
+            from urllib.parse import urlparse
+            for url in removed_urls:
+                domain = urlparse(url).netloc
+                if domain and domain not in result["bad_domains"]:
+                    print(f"\n⚠️ Adding {domain} to bad domains list")
+                    result["bad_domains"].append(domain)
+                
+        return result
+        
+    workflow.add_node("query_interpreter", wrapped_query_interpreter)
+    workflow.add_node("web_searcher", wrapped_web_searcher)
     
     # Create a synchronous wrapper for the async content editor
     def sync_edit_content(state: WorkflowState) -> WorkflowState:
@@ -79,32 +144,19 @@ def create_workflow_graph() -> StateGraph:
     # Define the edges with conditional routing
     workflow.set_entry_point("query_interpreter")
     
-    def route_based_on_status(state: WorkflowState) -> str:
-        """Route after query interpretation."""
-        status = state.get("status")
-        
-        if status == "error":
-            return "handle_error"
-        return "web_searcher"
-    
     def route_after_search(state: WorkflowState) -> str:
-        """Route after web search."""
+        """Route after web search."""        
         status = state.get("status")
-        retry_count = state.get("retry_count", 0)  # Get current retry count
+        retry_count = state.get("retry_count", 0)
         
         if status == "error":
             return "handle_error"
         elif status == "insufficient_results":
-            if retry_count >= 2:
+            # Check if we've hit max retries
+            if retry_count >= MAX_SEARCH_TRIES - 1:
                 print("\n⚠️ Maximum retry attempts reached, proceeding with available results")
                 state["status"] = "continue"
                 return "check_results"
-                
-            # Increment retry count and reset enhanced query
-            retry_count += 1  # Increment counter
-            state["retry_count"] = retry_count  # Store back in state
-            state["enhanced_query"] = None
-            print(f"\n🔄 Retrying with enhanced query (attempt {retry_count}/3)")
             return "query_interpreter"
             
         return "check_results"
@@ -118,7 +170,7 @@ def create_workflow_graph() -> StateGraph:
     # Add edges with conditional routing
     workflow.add_conditional_edges(
         "query_interpreter",
-        route_based_on_status
+        lambda s: "handle_error" if s.get("status") == "error" else "web_searcher"
     )
     
     workflow.add_conditional_edges(
@@ -148,7 +200,7 @@ def process_query(query: str) -> WorkflowOutput:
     # Create the workflow graph
     graph = create_workflow_graph()
     
-    # Initialize the state with retry_count
+    # Initialize the state with retry_count and bad_domains
     initial_state = WorkflowState(
         original_query=query,
         enhanced_query=None,
@@ -156,7 +208,8 @@ def process_query(query: str) -> WorkflowOutput:
         infographic_content=None,
         status="started",
         error=None,
-        retry_count=0  # Initialize retry counter
+        retry_count=0,  # Initialize retry counter
+        bad_domains=[]  # Initialize bad domains list
     )
     
     try:

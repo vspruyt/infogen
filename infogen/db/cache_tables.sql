@@ -28,3 +28,4 @@ CREATE INDEX IF NOT EXISTS idx_url_cache_query ON url_cache(query);
 CREATE INDEX IF NOT EXISTS idx_content_cache_query ON content_cache(query);
 CREATE INDEX IF NOT EXISTS idx_url_cache_enhanced_query ON url_cache(enhanced_query);
 CREATE INDEX IF NOT EXISTS idx_content_cache_enhanced_query ON content_cache(enhanced_query); 
+CREATE INDEX IF NOT EXISTS idx_url_cache_enhanced_query_embedding ON url_cache USING hnsw (enhanced_query_embedding vector_cosine_ops);

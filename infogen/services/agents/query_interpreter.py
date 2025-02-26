@@ -5,10 +5,20 @@ from datetime import datetime, timezone
 from langchain_core.callbacks import Callbacks
 from langchain_core.messages import BaseMessage
 from langchain_core.callbacks.manager import adispatch_custom_event
+from ..message_types import LogLevel, ProgressPhase, WorkflowMessage
 
 async def enhance_initial_query(state: WorkflowState) -> WorkflowState:
     """Enhance the initial query to be more specific and searchable."""
     try:
+
+        # Logging message streamed to the user
+        await adispatch_custom_event(
+            "query_interpreter",
+            {"message": WorkflowMessage.progress(phase=ProgressPhase.QUERY_INTERPRETATION, 
+                                                 message=f"🚀 Step 1: Enhancing initial query '{state['original_query']}'",
+                                                 data={"original_query": state["original_query"]})}
+        )
+
         # Initialize state if needed
         if "bad_domains" not in state:
             state["bad_domains"] = []
@@ -16,7 +26,14 @@ async def enhance_initial_query(state: WorkflowState) -> WorkflowState:
         # Handle retry logic
         if state.get("status") == "insufficient_results":
             retry_count = state.get("retry_count", 0) + 1
-            print(f"\n🔄 Retrying with enhanced query (attempt {retry_count + 1}/3)")
+            # Logging message streamed to the user
+            # Logging message streamed to the user
+            await adispatch_custom_event(
+                "query_interpreter",
+                {"message": WorkflowMessage.progress(phase=ProgressPhase.QUERY_INTERPRETATION, 
+                                                    message=f"🔄 Retrying with improved query (attempt {retry_count + 1}/3)",
+                                                    data={"retry": retry_count})}
+            )
             state["retry_count"] = retry_count
             
             # Clear enhanced query if retrying to force a new one
@@ -31,7 +48,7 @@ async def enhance_initial_query(state: WorkflowState) -> WorkflowState:
         
         prompt = f"""I built a product that takes in a user query, and generates an infographic on that topic. The user input sometimes is very short, but under the hood I'm using an AI agent based framework that requires a clear topic or question to be researched through web search queries.
 
-I will give you the user query. If that query already represents a good topic or question to be researched for an engaging infographic, then just return the input query. If not, then please turn the query into a good topic or question phrase.
+I will give you the user's search query. If that query already represents a good topic or question to be researched for an engaging infographic, then just return the input query. If not, then please turn the query into a good topic or question phrase.
 
 In case you need it: The current date is {datetime.now(timezone.utc).strftime('%B %d, %Y')}.
 
@@ -56,18 +73,15 @@ Here is the user query: "{state['original_query']}"."""
         
         state["enhanced_query"] = enhanced_query
         state["enhanced_query_embedding"] = embedding
-        state["status"] = "continue"
-
-        # Emit custom event showing query mapping
-        await adispatch_custom_event(
-            "query_mapping",
-            {"message": f"--->> Query mapping: '{state['original_query']}' -> '{enhanced_query}'"}
-        )
+        state["status"] = "continue"        
         
         return state
         
     except Exception as e:
         state["error"] = f"Error enhancing query: {str(e)}"
         state["status"] = "error"
-        print(e)
+        await adispatch_custom_event(
+                "query_interpreter",
+                {"message": WorkflowMessage.log(level=LogLevel.ERROR, message=f"❌ Unexpected error while enhancing query: {str(e)}", data={"exception":e})}
+            )
         return state 

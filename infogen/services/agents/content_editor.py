@@ -6,7 +6,9 @@ import asyncio
 from datetime import datetime, timezone
 from langchain_core.callbacks import Callbacks
 from langchain_core.messages import BaseMessage
+from ..clients.cached_tavily_client import CachedTavilyClient
 from langchain_core.callbacks.manager import adispatch_custom_event
+from ..message_types import LogLevel, ProgressPhase, WorkflowMessage
 
 def format_research_report(search_results: List[dict]) -> str:
     """Format search results into a research report."""
@@ -34,9 +36,12 @@ async def edit_content(state: WorkflowState) -> WorkflowState:
     """Process search results into infographic content."""
     try:
         # Emit custom event showing we're starting content generation
+        # Logging message streamed to the user
         await adispatch_custom_event(
-            "content_start",
-            {"message": "--->> Starting infographic content generation"}
+            "content_editor",
+            {"message": WorkflowMessage.progress(phase=ProgressPhase.CONTENT_EDITING, 
+                                                 message=f"🚀 Step 3: Writing the infographic content",
+                                                 )}
         )
             
         # Get unique search results by URL to avoid duplicates
@@ -48,11 +53,25 @@ async def edit_content(state: WorkflowState) -> WorkflowState:
                     unique_results[url] = result
 
         search_results = list(unique_results.values())
-        print(f"\nSearch results in content editor: {len(search_results)}")
+        if search_results:
+            await adispatch_custom_event(
+                "content_editor",
+                {"message": WorkflowMessage.log(level=LogLevel.INFO, 
+                                                    message=f"Received {len(search_results)} search results in content editor",
+                                                    )}
+            )
         
-        if not search_results:
+        if not search_results or len(search_results) == 0:
+            await adispatch_custom_event(
+                "content_editor",
+                {"message": WorkflowMessage.progress(phase=ProgressPhase.CONTENT_EDITING, 
+                                                    message=f"👉 Could not find enough valid content to create the infographic.",
+                                                    )}
+            )
+            
             state["error"] = "No valid search results to process"
             state["status"] = "error"
+            state["infographic_content"] = "No content could be generated due to insufficient search results"
             return state
             
         api_key = os.getenv("OPENAI_API_KEY")
@@ -60,12 +79,23 @@ async def edit_content(state: WorkflowState) -> WorkflowState:
             raise ValueError("OPENAI_API_KEY not found in environment variables")
         
         # Format the research report
-        research_report = format_research_report(search_results)
+        research_report = format_research_report(search_results)            
         
         # Print debug info
-        print(f"\nFormatted research report length: {len(research_report)}")
+        await adispatch_custom_event(
+            "content_editor",
+            {"message": WorkflowMessage.log(level=LogLevel.INFO, 
+                                                 message=f"Formatted research report length: {len(research_report)}",
+                                                 )}
+        )
+        
         if len(research_report) < 100:  # If report is suspiciously short
-            print(f"Research report content: {research_report}")
+            await adispatch_custom_event(
+            "content_editor",
+            {"message": WorkflowMessage.log(level=LogLevel.INFO, 
+                                                 message=f"Research report content: {research_report}",
+                                                 )}
+        )
         
         prompt = f"""#### Instructions ####
 You are an experienced desk researcher tasked with preparing content for a visually stunning infographic. The infographic will be created by designers based on your output and the research report below. 
@@ -73,6 +103,8 @@ You are an experienced desk researcher tasked with preparing content for a visua
 *Your output must be in Markdown format and adhere to the detailed specifications provided.*
 
 In case you need it: The current date is {datetime.now(timezone.utc).strftime('%B %d, %Y')}.
+
+The infographic will loosely try to answer the user search query '{state['original_query']}' which could potentially (but not necessarily) be interpreted as '{state['enhanced_query']}'.
 
 ---
 
@@ -85,6 +117,7 @@ Prepare engaging, thought-provoking, and accurate content for a 1-4 page infogra
 - Include references for every data point and section.
 - Don't specify which visual elements (e.g. charts, maps, etc.) to be used. That will be decided later by the designer.
 - Be concise and don't use too much text. Prefer numbers, tables, facts that can be visualized in charts over continuous text.
+- Make sure your summary doesn't become a commercial advertisement for the source websites! Try to extract the relevant information.
 
 #### Structure
 The infographic will include:
@@ -120,9 +153,7 @@ The infographic will include:
 ### Research Report
 
 {research_report}"""
-
-        print("\n📝 Editing content for infographic...")
-        
+                
         client = AsyncOpenAI(api_key=api_key)
         response = await client.chat.completions.create(
             model="gpt-4o",

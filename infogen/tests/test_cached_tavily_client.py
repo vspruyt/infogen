@@ -108,16 +108,20 @@ class TestCachedTavilyClient(unittest.TestCase):
         # Return a Python dictionary for the cached response, not a JSON string
         self.mock_cursor.fetchone.return_value = (mock_result, 10)
         
+        # Mock the cache duration determination
+        mock_search_params = {"time_range": None, "cache_duration_minutes": 14400}
+        
         # Test
-        with patch.object(self.client, '_execute_with_connection', side_effect=lambda x: x(self.mock_cursor)):
-            result = self.client.search("test query")
-            
-            # Verify
-            self.assertEqual(result, mock_result["results"])
-            self.mock_cursor.execute.assert_called_with(ANY, ANY)
-            self.mock_cursor.fetchone.assert_called_once()
-            # Tavily API should not be called
-            self.mock_tavily_client.search.assert_not_called()
+        with patch.object(self.client, '_get_search_cache_duration', return_value=mock_search_params):
+            with patch.object(self.client, '_execute_with_connection', side_effect=lambda x: x(self.mock_cursor)):
+                result = self.client.search("test query")
+                
+                # Verify
+                self.assertEqual(result, mock_result["results"])
+                self.mock_cursor.execute.assert_called_with(ANY, ANY)
+                self.mock_cursor.fetchone.assert_called_once()
+                # Tavily API should not be called
+                self.mock_tavily_client.search.assert_not_called()
 
     def test_search_no_cached_result(self):
         """Test search method with no cached result."""
@@ -182,7 +186,7 @@ class TestCachedTavilyClient(unittest.TestCase):
                 include_answer=False,
                 include_images=False,
                 exclude_domains=exclude_domains,
-                **kwargs  # This will include time_range from the test
+                time_range=kwargs.get('time_range')  # Get time_range from kwargs
             )
             return response["results"]
         
@@ -219,8 +223,9 @@ class TestCachedTavilyClient(unittest.TestCase):
         
         # Mock the cache duration determination
         mock_search_params = {"time_range": None, "cache_duration_minutes": 14400}
+        
+        # Test
         with patch.object(self.client, '_get_search_cache_duration', return_value=mock_search_params):
-            # Test
             with patch.object(self.client, '_execute_with_connection', side_effect=lambda x: x(self.mock_cursor)):
                 with self.assertRaises(ValueError) as context:
                     self.client.search("test query")
@@ -244,17 +249,21 @@ class TestCachedTavilyClient(unittest.TestCase):
         }
         self.mock_structured_output.invoke.return_value = expected_result
         
+        # Mock the database connection to return None (no cached result)
+        self.mock_cursor.fetchone.return_value = None
+        
         # Test
-        result = self.client._get_search_cache_duration("latest news")
-        
-        # Verify
-        self.assertEqual(result, expected_result)
-        self.mock_llm.with_structured_output.assert_called_once()
-        self.mock_structured_output.invoke.assert_called_once()
-        
-        # Verify the messages passed to the LLM contain the query
-        call_args = self.mock_structured_output.invoke.call_args[0][0]
-        self.assertIn("latest news", call_args[0][1])
+        with patch.object(self.client, '_execute_with_connection', side_effect=lambda x: x(self.mock_cursor) if callable(x) else None):
+            result = self.client._get_search_cache_duration("latest news")
+            
+            # Verify
+            self.assertEqual(result, expected_result)
+            self.mock_llm.with_structured_output.assert_called_once()
+            self.mock_structured_output.invoke.assert_called_once()
+            
+            # Verify the messages passed to the LLM contain the query
+            call_args = self.mock_structured_output.invoke.call_args[0][0]
+            self.assertIn("latest news", call_args[0][1])
 
     def test_get_search_cache_duration_invalid_time_range(self):
         """Test the _get_search_cache_duration method with an invalid time range."""
@@ -264,12 +273,16 @@ class TestCachedTavilyClient(unittest.TestCase):
             "cache_duration_minutes": 1440
         }
         
-        # Test
-        result = self.client._get_search_cache_duration("test query")
+        # Mock the database connection to return None (no cached result)
+        self.mock_cursor.fetchone.return_value = None
         
-        # Verify that the invalid time range is converted to None
-        self.assertIsNone(result["time_range"])
-        self.assertEqual(result["cache_duration_minutes"], 1440)
+        # Test
+        with patch.object(self.client, '_execute_with_connection', side_effect=lambda x: x(self.mock_cursor) if callable(x) else None):
+            result = self.client._get_search_cache_duration("test query")
+            
+            # Verify that the invalid time range is converted to None
+            self.assertIsNone(result["time_range"])
+            self.assertEqual(result["cache_duration_minutes"], 1440)
 
 if __name__ == '__main__':
     unittest.main() 

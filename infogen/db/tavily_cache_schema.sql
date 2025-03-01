@@ -13,6 +13,28 @@ CREATE TABLE IF NOT EXISTS tavily_basic_search_cache (
     UNIQUE(query, time_range)
 );
 
+-- Table for caching search cache duration results
+CREATE TABLE IF NOT EXISTS search_cache_duration (
+    id UUID PRIMARY KEY,
+    query TEXT NOT NULL UNIQUE,
+    embedding VECTOR(1536) NOT NULL,
+    time_range TEXT,
+    cache_duration_minutes INTEGER NOT NULL,
+    creation_date TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    expires_after_minutes INTEGER NOT NULL DEFAULT 43200
+);
+
+-- Index for faster query lookups in search_cache_duration
+CREATE INDEX IF NOT EXISTS search_cache_duration_query_idx ON search_cache_duration(query);
+
+-- Index for faster expiry checks in search_cache_duration
+CREATE INDEX IF NOT EXISTS search_cache_duration_expiry_idx 
+    ON search_cache_duration(creation_date, expires_after_minutes);
+
+-- Index for similarity search in search_cache_duration
+CREATE INDEX IF NOT EXISTS search_cache_duration_embedding_idx ON search_cache_duration 
+USING hnsw (embedding vector_cosine_ops);
+
 -- Index for faster query lookups
 CREATE INDEX IF NOT EXISTS tavily_basic_search_cache_query_idx ON tavily_basic_search_cache(query);
 

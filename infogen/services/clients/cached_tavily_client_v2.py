@@ -130,7 +130,7 @@ class CachedTavilyClient:
         query_embedding = self.embedding_client.get_embedding(query)
         
         # Get dynamic cache expiry duration based on query content
-        search_params = self._get_search_cache_duration(query)
+        search_params = self._get_search_cache_duration(query, query_embedding)
         cache_duration = search_params['cache_duration_minutes']
         time_range = search_params['time_range']
     
@@ -242,7 +242,7 @@ class CachedTavilyClient:
         # Get embedding for the query
         query_embedding = self.embedding_client.get_embedding(query)
         
-        search_params = self._get_search_cache_duration(query)
+        search_params = self._get_search_cache_duration(query, query_embedding)
         cache_duration = search_params['cache_duration_minutes']
         time_range = search_params['time_range']
         
@@ -524,7 +524,54 @@ class CachedTavilyClient:
             
         return results
 
-    def _get_search_cache_duration(self, query):    
+    def _get_search_cache_duration(self, query, query_embedding=None):    
+        """
+        Determine appropriate cache duration and time range filter for a search query.
+        
+        This method first checks if there's a semantically similar query in the cache.
+        If found, it returns the cached parameters. Otherwise, it uses an LLM to analyze
+        the query and determine appropriate caching parameters, then stores the result
+        in the cache for future use.
+        
+        Args:
+            query: The search query string
+            query_embedding: Optional pre-computed embedding for the query
+            
+        Returns:
+            Dict containing time_range and cache_duration_minutes
+        """
+        # Get embedding for the query if not provided
+        if query_embedding is None:
+            query_embedding = self.embedding_client.get_embedding(query)
+        
+        # Check if we have a cached result for a similar query
+        # This is executed within a database connection context
+        def check_cache(cur):
+            cur.execute("""
+                SELECT time_range, cache_duration_minutes 
+                FROM search_cache_duration 
+                WHERE 1 - (embedding <-> %s::vector) > 0.4
+                    AND CURRENT_TIMESTAMP < creation_date + (expires_after_minutes * interval '1 minute')
+                ORDER BY embedding <-> %s::vector ASC
+                LIMIT 1
+            """, (query_embedding, query_embedding))
+            
+            cache_result = cur.fetchone()
+            
+            if cache_result:
+                logger.info(f"[CACHE HIT] Found semantically similar cached search cache duration for query: {query}")
+                return {"time_range": cache_result[0], "cache_duration_minutes": cache_result[1]}
+            
+            return None
+        
+        # Try to get result from cache
+        cached_result = self._execute_with_connection(check_cache)
+        if cached_result:
+            logger.info(f"[CACHE HIT] Using cached search parameters for query '{query}': time_range={cached_result['time_range']}, cache_duration={cached_result['cache_duration_minutes']} minutes")
+            return cached_result
+            
+        # If not in cache, use LLM to determine cache duration
+        logger.info(f"[CACHE MISS] No cached search parameters found for query: '{query}', calling LLM")
         
         prompt = f"""I built a product that takes in a user search query and performs a web search for that topic phrase. The result of that web search is cached in a postgresql table for a number of minutes of my chosing.
         The amount of time we want to cache the results depends on what we're searching for. For example, if we are searching for something that is independent of time, we might want to cache for several months. But if we're searching for something that is only valid of a specific amount of time, we only want to cache for a little while.
@@ -706,4 +753,30 @@ class CachedTavilyClient:
            if result["time_range"] not in ["day", "week", "month", "year"] :
                result["time_range"] = None
 
+        # Cache the result for future use
+        def cache_result(cur):
+            logger.info(f"[CACHE STORE] Storing search parameters for query '{query}': time_range={result['time_range']}, cache_duration={result['cache_duration_minutes']} minutes")
+            cur.execute("""
+                INSERT INTO search_cache_duration 
+                (id, query, embedding, time_range, cache_duration_minutes, creation_date, expires_after_minutes)
+                VALUES (%s, %s, %s::vector, %s, %s, %s, %s)
+                ON CONFLICT (query) DO UPDATE
+                SET embedding = EXCLUDED.embedding,
+                    time_range = EXCLUDED.time_range,
+                    cache_duration_minutes = EXCLUDED.cache_duration_minutes,
+                    creation_date = EXCLUDED.creation_date,
+                    expires_after_minutes = EXCLUDED.expires_after_minutes
+            """, (
+                uuid.uuid4(),
+                query,
+                query_embedding,
+                result["time_range"],
+                result["cache_duration_minutes"],
+                datetime.datetime.now(),
+                self.CACHE_EXPIRY_MINUTES
+            ))
+        
+        # Store the result in cache
+        self._execute_with_connection(cache_result)
+        
         return result

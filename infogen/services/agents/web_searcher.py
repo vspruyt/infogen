@@ -6,7 +6,7 @@ from typing import List, Dict, AsyncGenerator, Optional
 import tiktoken
 import json
 from datetime import datetime, timezone
-from ..clients.cached_tavily_client import CachedTavilyClient
+from ..clients.cached_tavily_client_v2 import CachedTavilyClient
 from langchain_core.callbacks.manager import adispatch_custom_event
 from ..message_types import LogLevel, ProgressPhase, WorkflowMessage
 

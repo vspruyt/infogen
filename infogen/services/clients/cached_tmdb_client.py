@@ -8,9 +8,10 @@ from datetime import datetime, timedelta
 import os
 from omdb import OMDB
 import threading
-import logging
+from infogen.core.logging_config import get_logger
 
-logger = logging.getLogger(__name__)
+# Configure logging
+logger = get_logger(__name__)
 
 class CachedTMDBClient:
     # Configuration constants
@@ -49,6 +50,7 @@ class CachedTMDBClient:
         self._db_pool = self._connection_pools[self._process_key]
         self._local = threading.local()
         self._local.connection = None
+        logger.debug("CachedTMDBClient initialization complete")
         
     def __enter__(self):
         return self
@@ -58,21 +60,23 @@ class CachedTMDBClient:
         
     def close(self):
         """Close all connections and clean up resources for this process"""
+        logger.debug(f"Closing CachedTMDBClient for process {self._process_key}")
         with self._instance_lock:
             if self._process_key in self._connection_pools:
                 if hasattr(self._local, 'connection') and self._local.connection is not None:
                     try:
                         self._db_pool.putconn(self._local.connection)
-                    except Exception:
-                        pass  # Ignore errors during cleanup
+                    except Exception as e:
+                        logger.error(f"Error returning connection during close: {str(e)}")
                     self._local.connection = None
                 
                 logger.info(f"Closing connection pool for process {self._process_key}")
                 try:
                     self._connection_pools[self._process_key].closeall()
-                except Exception:
-                    pass  # Ignore errors during cleanup
+                except Exception as e:
+                    logger.error(f"Error closing connection pool: {str(e)}")
                 del self._connection_pools[self._process_key]
+                logger.debug(f"Connection pool for process {self._process_key} successfully closed")
                 
     def _execute_with_connection(self, operation):
         """Execute an operation with proper connection handling"""
@@ -93,15 +97,16 @@ class CachedTMDBClient:
             finally:
                 cur.close()
         except Exception as e:
+            logger.error(f"Database operation error: {str(e)}")
             conn.rollback()
             raise
         finally:
             logger.debug(f"Returning connection for process {process_key}, thread {thread_id}")
             self._db_pool.putconn(conn)
-
+        
     def search_multi(self, api_search_query: str) -> Dict:
         """
-        Search for movies, TV shows and people using TMDB's multi-search endpoint, with caching support.
+        Search for movies, TV shows, and people using TMDB API, with caching support.
         
         Args:
             api_search_query: The search query string
@@ -109,6 +114,7 @@ class CachedTMDBClient:
         Returns:
             Dict containing search results
         """
+        logger.info(f"Performing multi-search for query: '{api_search_query}'")
         return self._execute_with_connection(lambda cur: self._search_multi_internal(cur, api_search_query))
         
     def get_movie_info(self, tmdb_id: int) -> Dict:
@@ -116,11 +122,12 @@ class CachedTMDBClient:
         Get detailed movie information from TMDB API, with caching support.
         
         Args:
-            tmdb_id: The TMDB ID of the movie (integer)
+            tmdb_id: The TMDB ID of the movie
             
         Returns:
-            Dict containing movie details including credits, external IDs, release dates, and watch providers
+            Dict containing movie details including cast, crew, and related information
         """
+        logger.info(f"Getting movie info for TMDB ID: {tmdb_id}")
         return self._execute_with_connection(lambda cur: self._get_movie_info_internal(cur, tmdb_id))
         
     def get_omdb_movie_info(self, imdb_id: str) -> Dict:
@@ -131,20 +138,22 @@ class CachedTMDBClient:
             imdb_id: The IMDB ID of the movie
             
         Returns:
-            Dict containing movie details with full plot information
+            Dict containing movie details from OMDB
         """
+        logger.info(f"Getting OMDB movie info for IMDB ID: {imdb_id}")
         return self._execute_with_connection(lambda cur: self._get_omdb_movie_info_internal(cur, imdb_id))
         
     def get_collection_info(self, collection_id: int) -> Dict:
         """
-        Get detailed collection information from TMDB API, with caching support.
+        Get movie collection information from TMDB API, with caching support.
         
         Args:
-            collection_id: The TMDB Collection ID (integer)
+            collection_id: The TMDB collection ID
             
         Returns:
-            Dict containing collection details
+            Dict containing collection details and included movies
         """
+        logger.info(f"Getting collection info for collection ID: {collection_id}")
         return self._execute_with_connection(lambda cur: self._get_collection_info_internal(cur, collection_id))
         
     def get_tv_info(self, tmdb_id: int) -> Dict:
@@ -152,11 +161,12 @@ class CachedTMDBClient:
         Get detailed TV show information from TMDB API, with caching support.
         
         Args:
-            tmdb_id: The TMDB ID of the TV show (integer)
+            tmdb_id: The TMDB ID of the TV show
             
         Returns:
-            Dict containing TV show details including credits, external IDs, content ratings, and watch providers
+            Dict containing TV show details including seasons, cast, and related information
         """
+        logger.info(f"Getting TV show info for TMDB ID: {tmdb_id}")
         return self._execute_with_connection(lambda cur: self._get_tv_info_internal(cur, tmdb_id))
         
     def get_omdb_tv_info(self, imdb_id: str) -> Dict:
@@ -167,8 +177,9 @@ class CachedTMDBClient:
             imdb_id: The IMDB ID of the TV show
             
         Returns:
-            Dict containing TV show details with full plot information
+            Dict containing TV show details from OMDB
         """
+        logger.info(f"Getting OMDB TV info for IMDB ID: {imdb_id}")
         return self._execute_with_connection(lambda cur: self._get_omdb_tv_info_internal(cur, imdb_id))
         
     def get_season_info(self, tmdb_id: int, season_number: int) -> Dict:
@@ -176,12 +187,13 @@ class CachedTMDBClient:
         Get detailed TV season information from TMDB API, with caching support.
         
         Args:
-            tmdb_id: The TMDB ID of the TV show (integer)
+            tmdb_id: The TMDB ID of the TV show
             season_number: The season number
             
         Returns:
-            Dict containing season details including account states, credits, and external IDs
+            Dict containing season details including episodes
         """
+        logger.info(f"Getting season info for TMDB ID: {tmdb_id}, season: {season_number}")
         return self._execute_with_connection(lambda cur: self._get_season_info_internal(cur, tmdb_id, season_number))
         
     def get_people_info(self, tmdb_id: int) -> Dict:
@@ -189,49 +201,40 @@ class CachedTMDBClient:
         Get detailed person information from TMDB API, with caching support.
         
         Args:
-            tmdb_id: The TMDB ID of the person (integer)
+            tmdb_id: The TMDB ID of the person
             
         Returns:
-            Dict containing person details including combined credits and external IDs
+            Dict containing person details including filmography
         """
+        logger.info(f"Getting person info for TMDB ID: {tmdb_id}")
         return self._execute_with_connection(lambda cur: self._get_people_info_internal(cur, tmdb_id))
         
     def get_popular_list(self, media_type: str) -> Dict:
         """
-        Get popular list for movies, TV shows, or people from TMDB API, with caching support.
+        Get popular movies or TV shows from TMDB API, with caching support.
         
         Args:
-            media_type: The type of media to get popular list for ("movie", "tv", or "person")
+            media_type: Type of media ("movie" or "tv")
             
         Returns:
-            Dict containing popular items of the specified type
-            
-        Raises:
-            ValueError: If media_type is not one of "movie", "tv", or "person"
+            Dict containing list of popular media items
         """
-        if media_type not in ["movie", "tv", "person"]:
-            raise ValueError('media_type must be one of "movie", "tv", or "person"')
-            
+        logger.info(f"Getting popular list for media type: {media_type}")
         return self._execute_with_connection(lambda cur: self._get_popular_list_internal(cur, media_type))
         
     def get_top_rated_list(self, media_type: str) -> Dict:
         """
-        Get top rated list for movies or TV shows from TMDB API, with caching support.
+        Get top-rated movies or TV shows from TMDB API, with caching support.
         
         Args:
-            media_type: The type of media to get top rated list for ("movie" or "tv")
+            media_type: Type of media ("movie" or "tv")
             
         Returns:
-            Dict containing top rated items of the specified type
-            
-        Raises:
-            ValueError: If media_type is not one of "movie" or "tv"
+            Dict containing list of top-rated media items
         """
-        if media_type not in ["movie", "tv"]:
-            raise ValueError('media_type must be one of "movie" or "tv"')
-            
+        logger.info(f"Getting top-rated list for media type: {media_type}")
         return self._execute_with_connection(lambda cur: self._get_top_rated_list_internal(cur, media_type))
-
+        
     def _search_multi_internal(self, cur, api_search_query: str) -> Dict:
         # Check cache first
         cur.execute("""
@@ -241,34 +244,38 @@ class CachedTMDBClient:
                 AND CURRENT_TIMESTAMP < creation_date + (expires_after_minutes * interval '1 minute')
         """, (api_search_query,))
         
-        cache_result = cur.fetchone()                        
+        cache_result = cur.fetchone()
         
         if cache_result:
-            print("Found Cached result for query: ", api_search_query)
+            logger.info(f"[CACHE HIT] Found cached result for query: {api_search_query}")
             return cache_result[0]
             
         # If not in cache, call API
-        print(f"Calling TMDB API: search.multi for query '{api_search_query}'")
-        search = tmdb.Search()
-        response = search.multi(query=api_search_query)
-        
-        # Cache the results
-        cur.execute("""
-            INSERT INTO tmdb_search_cache 
-            (id, query, api_response, creation_date, expires_after_minutes)
-            VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT (query) DO UPDATE
-            SET api_response = EXCLUDED.api_response,
-                creation_date = EXCLUDED.creation_date,
-                expires_after_minutes = EXCLUDED.expires_after_minutes
-        """, (
-            uuid.uuid4(),
-            api_search_query,
-            Json(response),
-            datetime.now(),
-            self.CACHE_EXPIRY_MINUTES
-        ))
-        return response
+        logger.info(f"[API CALL] Calling TMDB API: search/multi for query '{api_search_query}'")
+        try:
+            search = tmdb.Search()
+            response = search.multi(query=api_search_query, include_adult=False)
+            
+            # Cache the results
+            logger.debug(f"Caching search results for query: {api_search_query}")
+            cur.execute("""
+                INSERT INTO tmdb_search_cache 
+                (query, api_response, creation_date, expires_after_minutes)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (query) DO UPDATE
+                SET api_response = EXCLUDED.api_response,
+                    creation_date = EXCLUDED.creation_date,
+                    expires_after_minutes = EXCLUDED.expires_after_minutes
+            """, (
+                api_search_query,
+                Json(response),
+                datetime.now(),
+                self.CACHE_EXPIRY_MINUTES
+            ))
+            return response
+        except Exception as e:
+            logger.error(f"Error calling TMDB API for search: {str(e)}")
+            raise
 
     def _get_movie_info_internal(self, cur, tmdb_id: int) -> Dict:
         # Check cache first
@@ -282,30 +289,37 @@ class CachedTMDBClient:
         cache_result = cur.fetchone()
         
         if cache_result:
-            print("Found Cached result for movie ID: ", tmdb_id)
+            logger.info(f"[CACHE HIT] Found cached movie info for TMDB ID: {tmdb_id}")
             return cache_result[0]
             
         # If not in cache, call API
-        print(f"Calling TMDB API: movie.info for movie ID {tmdb_id}")
-        movie = tmdb.Movies(tmdb_id)
-        response = movie.info(append_to_response="credits,external_ids,release_dates,watch/providers")
-        
-        # Cache the results
-        cur.execute("""
-            INSERT INTO tmdb_movie_cache 
-            (tmdb_id, api_response, creation_date, expires_after_minutes)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (tmdb_id) DO UPDATE
-            SET api_response = EXCLUDED.api_response,
-                creation_date = EXCLUDED.creation_date,
-                expires_after_minutes = EXCLUDED.expires_after_minutes
-        """, (
-            tmdb_id,
-            Json(response),
-            datetime.now(),
-            self.CACHE_EXPIRY_MINUTES
-        ))
-        return response
+        logger.info(f"[API CALL] Calling TMDB API: Movies.details for TMDB ID {tmdb_id}")
+        try:
+            movie = tmdb.Movies(tmdb_id)
+            response = movie.info(
+                append_to_response="credits,external_ids,release_dates,watch/providers,recommendations,similar"
+            )
+            
+            # Cache the results
+            logger.debug(f"Caching movie info for TMDB ID: {tmdb_id}")
+            cur.execute("""
+                INSERT INTO tmdb_movie_cache 
+                (tmdb_id, api_response, creation_date, expires_after_minutes)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (tmdb_id) DO UPDATE
+                SET api_response = EXCLUDED.api_response,
+                    creation_date = EXCLUDED.creation_date,
+                    expires_after_minutes = EXCLUDED.expires_after_minutes
+            """, (
+                tmdb_id,
+                Json(response),
+                datetime.now(),
+                self.CACHE_EXPIRY_MINUTES
+            ))
+            return response
+        except Exception as e:
+            logger.error(f"Error calling TMDB API for movie info: {str(e)}")
+            raise
 
     def _get_omdb_movie_info_internal(self, cur, imdb_id: str) -> Dict:
         # Check cache first
@@ -319,30 +333,35 @@ class CachedTMDBClient:
         cache_result = cur.fetchone()
         
         if cache_result:
-            print("Found Cached result for IMDB ID: ", imdb_id)
+            logger.info(f"[CACHE HIT] Found cached OMDB movie info for IMDB ID: {imdb_id}")
             return cache_result[0]
             
         # If not in cache, call API
-        print(f"Calling OMDB API: get_movie for IMDB ID {imdb_id}")
-        omdb = OMDB(os.getenv("OMDB_API_KEY"))
-        response = omdb.get_movie(imdbid=imdb_id, plot="full")
-        
-        # Cache the results
-        cur.execute("""
-            INSERT INTO omdb_movie_cache 
-            (imdb_id, api_response, creation_date, expires_after_minutes)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (imdb_id) DO UPDATE
-            SET api_response = EXCLUDED.api_response,
-                creation_date = EXCLUDED.creation_date,
-                expires_after_minutes = EXCLUDED.expires_after_minutes
-        """, (
-            imdb_id,
-            Json(response),
-            datetime.now(),
-            self.CACHE_EXPIRY_MINUTES
-        ))
-        return response
+        logger.info(f"[API CALL] Calling OMDB API for IMDB ID {imdb_id}")
+        try:
+            omdb_client = OMDB(os.getenv("OMDB_API_KEY"))
+            response = omdb_client.get(imdbid=imdb_id, fullplot=True, tomatoes=True)
+            
+            # Cache the results
+            logger.debug(f"Caching OMDB movie info for IMDB ID: {imdb_id}")
+            cur.execute("""
+                INSERT INTO omdb_movie_cache 
+                (imdb_id, api_response, creation_date, expires_after_minutes)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (imdb_id) DO UPDATE
+                SET api_response = EXCLUDED.api_response,
+                    creation_date = EXCLUDED.creation_date,
+                    expires_after_minutes = EXCLUDED.expires_after_minutes
+            """, (
+                imdb_id,
+                Json(response),
+                datetime.now(),
+                self.CACHE_EXPIRY_MINUTES
+            ))
+            return response
+        except Exception as e:
+            logger.error(f"Error calling OMDB API for movie info: {str(e)}")
+            raise
 
     def _get_collection_info_internal(self, cur, collection_id: int) -> Dict:
         # Check cache first
@@ -356,30 +375,35 @@ class CachedTMDBClient:
         cache_result = cur.fetchone()
         
         if cache_result:
-            print("Found Cached result for collection ID: ", collection_id)
+            logger.info(f"[CACHE HIT] Found cached collection info for collection ID: {collection_id}")
             return cache_result[0]
             
         # If not in cache, call API
-        print(f"Calling TMDB API: collection.info for collection ID {collection_id}")
-        collection = tmdb.Collections(collection_id)
-        response = collection.info()
-        
-        # Cache the results
-        cur.execute("""
-            INSERT INTO tmdb_collection_cache 
-            (collection_id, api_response, creation_date, expires_after_minutes)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (collection_id) DO UPDATE
-            SET api_response = EXCLUDED.api_response,
-                creation_date = EXCLUDED.creation_date,
-                expires_after_minutes = EXCLUDED.expires_after_minutes
-        """, (
-            collection_id,
-            Json(response),
-            datetime.now(),
-            self.CACHE_EXPIRY_MINUTES
-        ))
-        return response
+        logger.info(f"[API CALL] Calling TMDB API: Collections.details for collection ID {collection_id}")
+        try:
+            collection = tmdb.Collections(collection_id)
+            response = collection.info()
+            
+            # Cache the results
+            logger.debug(f"Caching collection info for collection ID: {collection_id}")
+            cur.execute("""
+                INSERT INTO tmdb_collection_cache 
+                (collection_id, api_response, creation_date, expires_after_minutes)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (collection_id) DO UPDATE
+                SET api_response = EXCLUDED.api_response,
+                    creation_date = EXCLUDED.creation_date,
+                    expires_after_minutes = EXCLUDED.expires_after_minutes
+            """, (
+                collection_id,
+                Json(response),
+                datetime.now(),
+                self.CACHE_EXPIRY_MINUTES
+            ))
+            return response
+        except Exception as e:
+            logger.error(f"Error calling TMDB API for collection info: {str(e)}")
+            raise
 
     def _get_tv_info_internal(self, cur, tmdb_id: int) -> Dict:
         # Check cache first
@@ -478,14 +502,13 @@ class CachedTMDBClient:
         # Cache the results
         cur.execute("""
             INSERT INTO tmdb_season_cache 
-            (id, tmdb_id, season_number, api_response, creation_date, expires_after_minutes)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            (tmdb_id, season_number, api_response, creation_date, expires_after_minutes)
+            VALUES (%s, %s, %s, %s, %s)
             ON CONFLICT (tmdb_id, season_number) DO UPDATE
             SET api_response = EXCLUDED.api_response,
                 creation_date = EXCLUDED.creation_date,
                 expires_after_minutes = EXCLUDED.expires_after_minutes
         """, (
-            uuid.uuid4(),
             tmdb_id,
             season_number,
             Json(response),
@@ -571,10 +594,9 @@ class CachedTMDBClient:
         # Cache the results
         cur.execute(f"""
             INSERT INTO {cache_table_map[media_type]} 
-            (id, api_response, creation_date, expires_after_minutes)
-            VALUES (%s, %s, %s, %s)
+            (api_response, creation_date, expires_after_minutes)
+            VALUES (%s, %s, %s)
         """, (
-            uuid.uuid4(),
             Json(response),
             datetime.now(),
             self.CACHE_EXPIRY_MINUTES
@@ -618,10 +640,9 @@ class CachedTMDBClient:
         # Cache the results
         cur.execute(f"""
             INSERT INTO {cache_table_map[media_type]} 
-            (id, api_response, creation_date, expires_after_minutes)
-            VALUES (%s, %s, %s, %s)
+            (api_response, creation_date, expires_after_minutes)
+            VALUES (%s, %s, %s)
         """, (
-            uuid.uuid4(),
             Json(response),
             datetime.now(),
             self.CACHE_EXPIRY_MINUTES

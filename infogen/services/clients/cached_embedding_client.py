@@ -7,6 +7,10 @@ import uuid
 from datetime import datetime
 import os
 import threading
+from infogen.core.logging_config import get_logger
+
+# Configure logging
+logger = get_logger(__name__)
 
 class CachedEmbeddingClient:
     _instance_lock = threading.Lock()
@@ -17,8 +21,10 @@ class CachedEmbeddingClient:
         register_uuid()
         self._process_key = os.getpid()
         self._thread_id = threading.get_ident()
+        logger.info(f"Initializing CachedEmbeddingClient for process {self._process_key}, thread {self._thread_id}")
         with self._instance_lock:
             if self._process_key not in self._connection_pools:
+                logger.info(f"Creating new connection pool for process {self._process_key}")
                 self._connection_pools[self._process_key] = ThreadedConnectionPool(
                     min_connections,
                     max_connections,
@@ -40,15 +46,21 @@ class CachedEmbeddingClient:
                 if hasattr(self._local, 'connection') and self._local.connection is not None:
                     try:
                         self._db_pool.putconn(self._local.connection)
-                    except Exception:
+                    except Exception as e:
+                        logger.error(f"Error returning connection during close: {str(e)}")
                         pass
                     self._local.connection = None
-                self._connection_pools[self._process_key].closeall()
+                logger.info(f"Closing connection pool for process {self._process_key}")
+                try:
+                    self._connection_pools[self._process_key].closeall()
+                except Exception as e:
+                    logger.error(f"Error closing connection pool: {str(e)}")
                 del self._connection_pools[self._process_key]
 
     def _execute_with_connection(self, operation):
         thread_id = threading.get_ident()
         process_key = os.getpid()
+        logger.debug(f"Getting connection for process {process_key}, thread {thread_id}")
         conn = self._db_pool.getconn()
         conn.autocommit = False
         try:
@@ -60,12 +72,15 @@ class CachedEmbeddingClient:
             finally:
                 cur.close()
         except Exception as e:
+            logger.error(f"Error executing database operation: {str(e)}")
             conn.rollback()
             raise
         finally:
+            logger.debug(f"Returning connection for process {process_key}, thread {thread_id}")
             self._db_pool.putconn(conn)
 
     def get_embedding(self, text: str) -> List[float]:
+        logger.debug(f"Getting embedding for text: {text[:50]}...")
         return self._execute_with_connection(lambda cur: self._get_embedding_internal(cur, text))
 
     def _parse_vector(self, vector_str: str) -> List[float]:
@@ -87,28 +102,37 @@ class CachedEmbeddingClient:
         """, (text,))
         cache_result = cur.fetchone()
         if cache_result:
-            print(f"[CACHE HIT] Found embedding in cache for text: {text[:50]}...")
+            logger.info(f"[CACHE HIT] Found embedding in cache for text: {text[:50]}...")
             # Parse vector string to list of floats
             return self._parse_vector(cache_result[0])
-        print(f"[API CALL] Fetching embedding from OpenAI API for text: {text[:50]}...")
-        response = self.client.embeddings.create(model="text-embedding-3-small", input=[text])
-        embedding = response.data[0].embedding
-        cur.execute("""
-            INSERT INTO embedding_cache 
-            (id, text, embedding, creation_date)
-            VALUES (%s, %s, %s::vector, %s)
-            ON CONFLICT (text) DO UPDATE
-            SET embedding = EXCLUDED.embedding,
-                creation_date = EXCLUDED.creation_date
-        """, (
-            uuid.uuid4(),
-            text,
-            self._format_vector(embedding),
-            datetime.now()
-        ))
-        return embedding
+        logger.info(f"[API CALL] Fetching embedding from OpenAI API for text: {text[:50]}...")
+        try:
+            response = self.client.embeddings.create(model="text-embedding-3-small", input=[text])
+            embedding = response.data[0].embedding
+            logger.debug(f"Successfully received embedding from API (dimensions: {len(embedding)})")
+            
+            # Cache the embedding
+            cur.execute("""
+                INSERT INTO embedding_cache 
+                (id, text, embedding, creation_date)
+                VALUES (%s, %s, %s::vector, %s)
+                ON CONFLICT (text) DO UPDATE
+                SET embedding = EXCLUDED.embedding,
+                    creation_date = EXCLUDED.creation_date
+            """, (
+                uuid.uuid4(),
+                text,
+                self._format_vector(embedding),
+                datetime.now()
+            ))
+            logger.debug("Successfully cached embedding in database")
+            return embedding
+        except Exception as e:
+            logger.error(f"Error getting embedding from OpenAI API: {str(e)}")
+            raise
 
     def get_embeddings(self, texts: List[str]) -> List[List[float]]:
+        logger.debug(f"Getting embeddings for {len(texts)} texts")
         return self._execute_with_connection(lambda cur: self._get_embeddings_internal(cur, texts))
 
     def _get_embeddings_internal(self, cur, texts: List[str]) -> List[List[float]]:
@@ -125,41 +149,46 @@ class CachedEmbeddingClient:
             """, (text,))
             cache_result = cur.fetchone()
             if cache_result:
-                print(f"[CACHE HIT] Found embedding in cache for text: {text[:50]}...")
+                logger.debug(f"[CACHE HIT] Found embedding in cache for text {i}: {text[:50]}...")
                 embeddings.append(self._parse_vector(cache_result[0]))
             else:
-                print(f"[CACHE MISS] No cached embedding for text: {text[:50]}...")
+                logger.debug(f"[CACHE MISS] No cached embedding for text {i}: {text[:50]}...")
                 uncached_texts.append(text)
                 uncached_indices.append(i)
         
         # If we have any uncached texts, get them all at once from the API
         if uncached_texts:
-            print(f"[BATCH API CALL] Fetching {len(uncached_texts)} embeddings from OpenAI API...")
-            response = self.client.embeddings.create(model="text-embedding-3-small", input=uncached_texts)
-            new_embeddings = [embedding.embedding for embedding in response.data]
-            print(f"[BATCH API CALL] Successfully received {len(new_embeddings)} embeddings from API")
-            
-            # Cache all the new embeddings
-            for text, embedding in zip(uncached_texts, new_embeddings):
-                cur.execute("""
-                    INSERT INTO embedding_cache 
-                    (id, text, embedding, creation_date)
-                    VALUES (%s, %s, %s::vector, %s)
-                    ON CONFLICT (text) DO UPDATE
-                    SET embedding = EXCLUDED.embedding,
-                        creation_date = EXCLUDED.creation_date
-                """, (
-                    uuid.uuid4(),
-                    text,
-                    self._format_vector(embedding),
-                    datetime.now()
-                ))
-            
-            # Insert new embeddings into the result list at their original positions
-            for idx, embedding in zip(uncached_indices, new_embeddings):
-                while len(embeddings) <= idx:
-                    embeddings.append(None)
-                embeddings[idx] = embedding
+            logger.info(f"[BATCH API CALL] Fetching {len(uncached_texts)} embeddings from OpenAI API...")
+            try:
+                response = self.client.embeddings.create(model="text-embedding-3-small", input=uncached_texts)
+                new_embeddings = [embedding.embedding for embedding in response.data]
+                logger.info(f"[BATCH API CALL] Successfully received {len(new_embeddings)} embeddings from API")
+                
+                # Cache all the new embeddings
+                for text, embedding in zip(uncached_texts, new_embeddings):
+                    cur.execute("""
+                        INSERT INTO embedding_cache 
+                        (id, text, embedding, creation_date)
+                        VALUES (%s, %s, %s::vector, %s)
+                        ON CONFLICT (text) DO UPDATE
+                        SET embedding = EXCLUDED.embedding,
+                            creation_date = EXCLUDED.creation_date
+                    """, (
+                        uuid.uuid4(),
+                        text,
+                        self._format_vector(embedding),
+                        datetime.now()
+                    ))
+                logger.debug(f"Successfully cached {len(new_embeddings)} embeddings in database")
+                
+                # Insert new embeddings into the result list at their original positions
+                for idx, embedding in zip(uncached_indices, new_embeddings):
+                    while len(embeddings) <= idx:
+                        embeddings.append(None)
+                    embeddings[idx] = embedding
+            except Exception as e:
+                logger.error(f"Error getting batch embeddings from OpenAI API: {str(e)}")
+                raise
         
         return embeddings
 
@@ -174,6 +203,7 @@ class CachedEmbeddingClient:
         Returns:
             List of dictionaries containing the similar texts and their similarity scores
         """
+        logger.info(f"Finding {k} nearest neighbors for text: {text[:50]}...")
         return self._execute_with_connection(lambda cur: self._nearest_neighbors_internal(cur, text, k))
         
     def _nearest_neighbors_internal(self, cur, text: str, k: int) -> List[Dict[str, any]]:
@@ -200,10 +230,10 @@ class CachedEmbeddingClient:
             })
             
         if results:
-            print(f"[NEIGHBORS] Found {len(results)} similar texts")
-            for r in results:
-                print(f"[NEIGHBORS] Similarity {r['similarity']:.3f} for text: {r['text'][:100]}...")
+            logger.info(f"[NEIGHBORS] Found {len(results)} similar texts")
+            for i, r in enumerate(results):
+                logger.debug(f"[NEIGHBORS] #{i+1}: Similarity {r['similarity']:.3f} for text: {r['text'][:100]}...")
         else:
-            print(f"[NEIGHBORS] No similar texts found")
+            logger.warning(f"[NEIGHBORS] No similar texts found")
             
         return results 

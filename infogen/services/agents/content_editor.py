@@ -6,7 +6,7 @@ import asyncio
 from datetime import datetime, timezone
 from langchain_core.callbacks import Callbacks
 from langchain_core.messages import BaseMessage
-from ..clients.cached_tavily_client import CachedTavilyClient
+from ..clients.cached_tavily_client_v2 import CachedTavilyClient
 from langchain_core.callbacks.manager import adispatch_custom_event
 from ..message_types import LogLevel, ProgressPhase, WorkflowMessage
 

@@ -10,6 +10,10 @@ import asyncio
 from olclient.openlibrary import OpenLibrary
 import olclient.common as common
 import json
+from infogen.core.logging_config import get_logger
+
+# Configure logging
+logger = get_logger(__name__)
 
 class CachedOpenLibraryClient:
     # Configuration constants
@@ -32,11 +36,11 @@ class CachedOpenLibraryClient:
         # Create a unique key for this process's connection pool
         self._process_key = os.getpid()
         self._thread_id = threading.get_ident()
-        print(f"[INIT] Initializing CachedOpenLibraryClient for process {self._process_key}, thread {self._thread_id}")
+        logger.info(f"[INIT] Initializing CachedOpenLibraryClient for process {self._process_key}, thread {self._thread_id}")
         
         with self._instance_lock:
             if self._process_key not in self._connection_pools:
-                print(f"[INIT] Creating new connection pool for process {self._process_key}")
+                logger.info(f"[INIT] Creating new connection pool for process {self._process_key}")
                 self._connection_pools[self._process_key] = ThreadedConnectionPool(
                     min_connections,
                     max_connections,
@@ -65,7 +69,7 @@ class CachedOpenLibraryClient:
                         pass  # Ignore errors during cleanup
                     self._local.connection = None
                 
-                print(f"[CLOSE] Closing connection pool for process {self._process_key}")
+                logger.info(f"[CLOSE] Closing connection pool for process {self._process_key}")
                 try:
                     self._connection_pools[self._process_key].closeall()
                 except Exception:
@@ -78,7 +82,7 @@ class CachedOpenLibraryClient:
         process_key = os.getpid()
         
         # Get a fresh connection for each operation to avoid timeout issues
-        print(f"[CONN] Getting new connection for process {process_key}, thread {thread_id}")
+        logger.info(f"[CONN] Getting new connection for process {process_key}, thread {thread_id}")
         conn = self._db_pool.getconn()
         conn.autocommit = False
         
@@ -94,7 +98,7 @@ class CachedOpenLibraryClient:
             conn.rollback()
             raise
         finally:
-            print(f"[CONN] Returning connection for process {process_key}, thread {thread_id}")
+            logger.info(f"[CONN] Returning connection for process {process_key}, thread {thread_id}")
             self._db_pool.putconn(conn)
 
     def search_multi(self, api_search_query: str, media_type: str) -> Dict:
@@ -125,11 +129,11 @@ class CachedOpenLibraryClient:
         cache_result = cur.fetchone()                        
         
         if cache_result:
-            print(f"Found Cached result for {media_type} query: {api_search_query}")
+            logger.info(f"Found Cached result for {media_type} query: {api_search_query}")
             return cache_result[0]
             
         # If not in cache, call API
-        print(f"Calling OpenLibrary API: search for {media_type} with query '{api_search_query}'")
+        logger.info(f"Calling OpenLibrary API: search for {media_type} with query '{api_search_query}'")
         
         if media_type == "author":
             response = self.ol.Author.search(api_search_query, limit=10)
@@ -187,11 +191,11 @@ class CachedOpenLibraryClient:
         cache_result = cur.fetchone()
         
         if cache_result:
-            print(f"Found Cached result for author key: {key}")
+            logger.info(f"Found Cached result for author key: {key}")
             return cache_result[0]
             
         # If not in cache, call API
-        print(f"Calling OpenLibrary API: Author.get for key {key}")
+        logger.info(f"Calling OpenLibrary API: Author.get for key {key}")
         response = self.ol.Author.get(key)
         
         if response:
@@ -238,11 +242,11 @@ class CachedOpenLibraryClient:
         cache_result = cur.fetchone()
         
         if cache_result:
-            print(f"Found Cached result for author works: {author.olid}")
+            logger.info(f"Found Cached result for author works: {author.olid}")
             return cache_result[0]
             
         # If not in cache, call API
-        print(f"Calling OpenLibrary API: author.works for author {author.olid}")
+        logger.info(f"Calling OpenLibrary API: author.works for author {author.olid}")
         response = author.works(limit=100)
         
         # Cache the results
@@ -286,11 +290,11 @@ class CachedOpenLibraryClient:
         cache_result = cur.fetchone()
         
         if cache_result:
-            print(f"Found Cached result for work: {ol_id}")
+            logger.info(f"Found Cached result for work: {ol_id}")
             return cache_result[0]
             
         # If not in cache, call API
-        print(f"Calling OpenLibrary API: Work.get for work {ol_id}")
+        logger.info(f"Calling OpenLibrary API: Work.get for work {ol_id}")
         response = self.ol.Work.get(ol_id)
         if response:
             response = response.json()
@@ -336,11 +340,11 @@ class CachedOpenLibraryClient:
         cache_result = cur.fetchone()
         
         if cache_result:
-            print(f"Found Cached result for work editions: {work.olid}")
+            logger.info(f"Found Cached result for work editions: {work.olid}")
             return cache_result[0]
             
         # If not in cache, call API
-        print(f"Calling OpenLibrary API: work.editions for work {work.olid}")
+        logger.info(f"Calling OpenLibrary API: work.editions for work {work.olid}")
         response = work.editions
 
         if response:

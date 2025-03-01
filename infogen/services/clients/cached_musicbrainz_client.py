@@ -8,6 +8,10 @@ from datetime import datetime, timedelta
 import os
 import threading
 import pylast
+from infogen.core.logging_config import get_logger
+
+# Configure logging
+logger = get_logger(__name__)
 
 class CachedMusicBrainzClient:
     # Configuration constants
@@ -36,11 +40,11 @@ class CachedMusicBrainzClient:
         # Create a unique key for this process's connection pool
         self._process_key = os.getpid()
         self._thread_id = threading.get_ident()
-        print(f"[INIT] Initializing CachedMusicBrainzClient for process {self._process_key}, thread {self._thread_id}")
+        logger.info(f"[INIT] Initializing CachedMusicBrainzClient for process {self._process_key}, thread {self._thread_id}")
         
         with self._instance_lock:
             if self._process_key not in self._connection_pools:
-                print(f"[INIT] Creating new connection pool for process {self._process_key}")
+                logger.info(f"[INIT] Creating new connection pool for process {self._process_key}")
                 self._connection_pools[self._process_key] = ThreadedConnectionPool(
                     min_connections,
                     max_connections,
@@ -68,7 +72,7 @@ class CachedMusicBrainzClient:
                         pass  # Ignore errors during cleanup
                     self._local.connection = None
                 
-                print(f"[CLOSE] Closing connection pool for process {self._process_key}")
+                logger.info(f"[CLOSE] Closing connection pool for process {self._process_key}")
                 try:
                     self._connection_pools[self._process_key].closeall()
                 except Exception:
@@ -81,12 +85,12 @@ class CachedMusicBrainzClient:
         process_key = os.getpid()
         
         if not hasattr(self._local, 'connection') or self._local.connection is None:
-            print(f"[CONN] Getting new connection for process {process_key}, thread {thread_id}")
+            logger.info(f"[CONN] Getting new connection for process {process_key}, thread {thread_id}")
             try:
                 self._local.connection = self._db_pool.getconn()
-                print(f"[CONN] Got connection for process {process_key}, thread {thread_id}. Pool status: used={len(self._db_pool._used)}, idle={len(self._db_pool._pool)}")
+                logger.info(f"[CONN] Got connection for process {process_key}, thread {thread_id}. Pool status: used={len(self._db_pool._used)}, idle={len(self._db_pool._pool)}")
             except Exception as e:
-                print(f"[ERROR] Error getting connection for process {process_key}, thread {thread_id}: {str(e)}")
+                logger.error(f"[ERROR] Error getting connection for process {process_key}, thread {thread_id}: {str(e)}")
                 raise
         return self._local.connection
         
@@ -97,12 +101,12 @@ class CachedMusicBrainzClient:
         
         if hasattr(self._local, 'connection') and self._local.connection is not None:
             try:
-                print(f"[CONN] Returning connection for process {process_key}, thread {thread_id}")
+                logger.info(f"[CONN] Returning connection for process {process_key}, thread {thread_id}")
                 self._db_pool.putconn(self._local.connection)
                 self._local.connection = None
-                print(f"[CONN] Returned connection. Pool status: used={len(self._db_pool._used)}, idle={len(self._db_pool._pool)}")
+                logger.info(f"[CONN] Returned connection. Pool status: used={len(self._db_pool._used)}, idle={len(self._db_pool._pool)}")
             except Exception as e:
-                print(f"[ERROR] Error returning connection for process {process_key}, thread {thread_id}: {str(e)}")
+                logger.error(f"[ERROR] Error returning connection for process {process_key}, thread {thread_id}: {str(e)}")
                 raise
                 
     def _execute_with_connection(self, operation):
@@ -111,7 +115,7 @@ class CachedMusicBrainzClient:
         process_key = os.getpid()
         
         # Get a fresh connection for each operation to avoid timeout issues
-        print(f"[CONN] Getting new connection for process {process_key}, thread {thread_id}")
+        logger.info(f"[CONN] Getting new connection for process {process_key}, thread {thread_id}")
         conn = self._db_pool.getconn()
         conn.autocommit = False
         
@@ -127,7 +131,7 @@ class CachedMusicBrainzClient:
             conn.rollback()
             raise
         finally:
-            print(f"[CONN] Returning connection for process {process_key}, thread {thread_id}")
+            logger.info(f"[CONN] Returning connection for process {process_key}, thread {thread_id}")
             self._db_pool.putconn(conn)
 
     def _execute_with_connection_async(self, operation):
@@ -136,7 +140,7 @@ class CachedMusicBrainzClient:
         process_key = os.getpid()
         
         # Get a fresh connection for the async operation
-        print(f"[CONN] Getting new connection for async operation in process {process_key}, thread {thread_id}")
+        logger.info(f"[CONN] Getting new connection for async operation in process {process_key}, thread {thread_id}")
         conn = self._db_pool.getconn()
         conn.autocommit = False
         
@@ -152,7 +156,7 @@ class CachedMusicBrainzClient:
             conn.rollback()
             raise
         finally:
-            print(f"[CONN] Returning connection for async operation in process {process_key}, thread {thread_id}")
+            logger.info(f"[CONN] Returning connection for async operation in process {process_key}, thread {thread_id}")
             self._db_pool.putconn(conn)
 
     def search_multi(self, api_search_query: str, media_type: str, artist_name: Optional[str] = None) -> Dict:
@@ -184,11 +188,11 @@ class CachedMusicBrainzClient:
         cache_result = cur.fetchone()
         
         if cache_result:
-            print(f"Found Cached result for {media_type} query: {api_search_query}")
+            logger.info(f"Found Cached result for {media_type} query: {api_search_query}")
             return cache_result[0]
             
         # If not in cache, call appropriate API based on media type
-        print(f"Calling MusicBrainz API: search_{media_type}s for query '{api_search_query}'")
+        logger.info(f"Calling MusicBrainz API: search_{media_type}s for query '{api_search_query}'")
         
         if media_type == "artist":
             response = musicbrainzngs.search_artists(query=api_search_query, limit=10)
@@ -303,11 +307,11 @@ class CachedMusicBrainzClient:
         cache_result = cur.fetchone()
         
         if cache_result:
-            print(f"Found Cached result for release MBID: {main_release_id}")
+            logger.info(f"Found Cached result for release MBID: {main_release_id}")
             return cache_result[0]
 
         # If not in cache, call API
-        print(f"Calling MusicBrainz API: get_release_by_id for MBID {main_release_id}")
+        logger.info(f"Calling MusicBrainz API: get_release_by_id for MBID {main_release_id}")
         response = musicbrainzngs.get_release_by_id(main_release_id, includes=["recordings"])
         
         # Cache the results
@@ -363,11 +367,11 @@ class CachedMusicBrainzClient:
         cache_result = cur.fetchone()
         
         if cache_result:
-            print(f"Found Cached result for {media_type} MBID: {mbid}")
+            logger.info(f"Found Cached result for {media_type} MBID: {mbid}")
             return cache_result[0]
             
         # If not in cache, call appropriate API based on media type
-        print(f"Calling MusicBrainz API: get_{media_type} for MBID {mbid}")
+        logger.info(f"Calling MusicBrainz API: get_{media_type} for MBID {mbid}")
         
         if media_type == "artist":
             response = musicbrainzngs.get_artist_by_id(
@@ -437,11 +441,11 @@ class CachedMusicBrainzClient:
         cache_result = cur.fetchone()
         
         if cache_result:
-            print(f"Found Cached result for artist bio MBID: {mbid}")
+            logger.info(f"Found Cached result for artist bio MBID: {mbid}")
             return cache_result[0]
             
         # If not in cache, call LastFM API
-        print(f"Calling LastFM API: get_artist_bio for MBID {mbid}")
+        logger.info(f"Calling LastFM API: get_artist_bio for MBID {mbid}")
         
         # Initialize LastFM API
         lastfm_network = pylast.LastFMNetwork(
@@ -452,12 +456,12 @@ class CachedMusicBrainzClient:
         # Get artist bio
         last_fm_artist = lastfm_network.get_artist_by_mbid(mbid)
         if not last_fm_artist:
-            print(f"No LastFM artist found for MBID: {mbid}")
+            logger.info(f"No LastFM artist found for MBID: {mbid}")
             return None
             
         bio = last_fm_artist.get_bio_content()
         if not bio:
-            print(f"No biography found for artist MBID: {mbid}")
+            logger.info(f"No biography found for artist MBID: {mbid}")
             return None
             
         # Prepare response

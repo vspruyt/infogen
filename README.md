@@ -1,7 +1,20 @@
 # infogen
 
-Folder structure of the repo:
+Advanced Langgraph agent swarm to do deep research and turn the result into a visually pleasing HTML infographic.
+The agent team consists of:
+- A strategy team: Turns the user query into a strategy through reflection
+- A planner team: Plans the topics to be researched, and the specialists to invoke
+- A research team: Coordinators with the subteams to perform the research:
+   - Entertainment specialist team: Subagents (literature_agent, movie_and_tv_agent, music_agent) use specialist sources (open movie database, TMDB, MusicBrainz, OpenLibrary) for their research.
+   - Web research team: Performs parallel web research using Tavily and handles content curation
+- Report writer: Consolidates all results that were gathered in parallel and writes the final report
+- Content team: Turns the report into a visually pleasing infographic, writes the HTML/CSS/Javascript code (ShadCN, React), reviews and iterates until done.
 
+![Example Image](agents.png).
+
+
+Folder structure of the repo:
+```shell
 infogen/
 ├── infogen/                # Python package/pplication code
 │   ├── __init__.py         # Makes `app` a package
@@ -33,4 +46,4 @@ infogen/
 ├── docker-compose.yml      # Docker Compose for local dev (optional)
 ├── requirements.txt        # Python dependencies
 ├── README.md               # Project documentation
-
+```

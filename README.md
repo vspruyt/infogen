@@ -1,6 +1,7 @@
 # infogen
 
 Advanced Langgraph agent swarm to do deep research and turn the result into a visually pleasing HTML infographic.
+Uses Langgraph's advanced dynamic routing functionality to perform as many task as possible in parallel, dynamically instantiating agents based on the output of the strategy agent team.
 
 The main logic (agents and api clients) is in the infogen/services folder.
 

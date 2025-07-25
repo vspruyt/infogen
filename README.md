@@ -1,6 +1,9 @@
 # infogen
 
 Advanced Langgraph agent swarm to do deep research and turn the result into a visually pleasing HTML infographic.
+
+The main logic (agents and api clients) is in the infogen/services folder.
+
 The agent team consists of:
 - A strategy team: Turns the user query into a strategy through reflection
 - A planner team: Plans the topics to be researched, and the specialists to invoke
